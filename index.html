@@ -227,10 +227,18 @@ const volPct  = document.getElementById('volPct');
 const list    = document.getElementById('list');
 
 let current = null;      // 選択中の局
-let playing = false;
+let playing = false;     // 実際に音が出ている
+let intent = false;      // ユーザーが再生を望んでいる（停止ボタンを押すまで true。自動再接続の判断に使う）
+let hadPlayed = false;   // 今回の再生で一度でも音が出たか（出ていなければ数回で諦める）
+let retryCount = 0;
+let retryTimer = null;   // 再接続待ちタイマー
+let stallTimer = null;   // バッファリングが長引いたときの監視タイマー
 let npTimer = null;      // 曲名ポーリング
 let npAbort = null;      // 曲名取得中の fetch を中断する用
 const NP_INTERVAL = 20000;
+const RETRY_MAX_WAIT = 30000;   // 再接続の最大待ち時間
+const RETRY_GIVEUP = 3;         // 一度も鳴らないまま失敗したら諦める回数
+const STALL_TIMEOUT = 15000;    // バッファリングがこの時間続いたら取り直す
 
 // ---- 非表示リスト（局名で管理、localStorage に保存） ------------------
 const HIDDEN_KEY = 'sjr.hidden';
@@ -298,15 +306,31 @@ function select(i, autoplay) {
 }
 
 // ---- 再生・停止 -----------------------------------------------------
+// スマホのスリープ・回線切替・PC のスリープ復帰などでストリームが切れても、
+// 停止ボタンを押すまでは自動で繋ぎ直す（1,2,4,8,16,30 秒と間隔を延ばしながら）。
 function play() {
   if (!current) return;
+  intent = true;
+  hadPlayed = false;
+  retryCount = 0;
+  clearRetry(); clearStall();
   setStatus('接続中…', '');
+  btnPlay.textContent = '■';
+  btnPlay.setAttribute('aria-label', '停止');
   audio.src = current.url;
   audio.volume = vol.value / 100;
-  audio.play().catch(e => setStatus('再生できません: ' + e.message, 'err'));
+  updateMediaSession(current.name, '');   // ロック画面・通知に局名を出す
+  audio.play().catch(e => {
+    if (e.name === 'NotAllowedError') {   // 自動再生が許可されていない: 再試行しても無駄
+      stop(false); setStatus('再生ボタンを押してください', 'err'); return;
+    }
+    scheduleRetry();
+  });
 }
 
 function stop(updateUi = true) {
+  intent = false;
+  clearRetry(); clearStall();
   audio.pause();
   audio.removeAttribute('src');   // バッファリングも止める
   audio.load();
@@ -315,24 +339,82 @@ function stop(updateUi = true) {
   disc.classList.remove('spinning');
   btnPlay.textContent = '▶';
   btnPlay.setAttribute('aria-label', '再生');
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'none';
   if (updateUi) setStatus('停止中', '');
 }
 
-btnPlay.addEventListener('click', () => playing ? stop() : play());
+// 切断を検知したときの表示（intent は保ったまま）
+function markDisconnected(msg) {
+  playing = false;
+  stopNowPlaying();
+  disc.classList.remove('spinning');
+  setStatus(msg || '接続が切れました。再接続します…', 'err');
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'paused';
+}
+
+function reconnect() {
+  clearRetry(); clearStall();
+  if (!intent || !current) return;
+  retryCount++;
+  setStatus('再接続中…（' + retryCount + '回目）', '');
+  audio.src = current.url;   // src を入れ直して取り直す
+  audio.load();
+  audio.play().catch(() => scheduleRetry());
+}
+
+function scheduleRetry() {
+  if (!intent) return;
+  clearRetry();
+  if (!hadPlayed && retryCount >= RETRY_GIVEUP) {   // 最初から一度も鳴らない = 局側の問題
+    stop(false);
+    setStatus('ストリームに接続できませんでした', 'err');
+    return;
+  }
+  const wait = Math.min(1000 * Math.pow(2, Math.min(retryCount, 5)), RETRY_MAX_WAIT);
+  retryTimer = setTimeout(reconnect, wait);
+}
+function clearRetry() { clearTimeout(retryTimer); retryTimer = null; }
+function clearStall() { clearTimeout(stallTimer); stallTimer = null; }
+function armStall() {
+  clearStall();
+  stallTimer = setTimeout(() => { if (intent) { markDisconnected('応答がありません。再接続します…'); reconnect(); } }, STALL_TIMEOUT);
+}
+
+btnPlay.addEventListener('click', () => intent ? stop() : play());
 
 audio.addEventListener('playing', () => {
   playing = true;
+  hadPlayed = true;
+  retryCount = 0;
+  clearRetry(); clearStall();
   disc.classList.add('spinning');
   btnPlay.textContent = '■';
   btnPlay.setAttribute('aria-label', '停止');
   setStatus('再生中', 'on');
+  if ('mediaSession' in navigator) navigator.mediaSession.playbackState = 'playing';
   startNowPlaying();
 });
-audio.addEventListener('waiting', () => setStatus('バッファリング中…', ''));
+audio.addEventListener('waiting', () => { setStatus('バッファリング中…', ''); armStall(); });
+audio.addEventListener('stalled', () => armStall());
+audio.addEventListener('timeupdate', () => { if (stallTimer && !audio.paused) clearStall(); });   // 音が流れていれば監視解除
 audio.addEventListener('error', () => {
+  if (intent) { markDisconnected(); scheduleRetry(); return; }
   stop(false);
   setStatus('ストリームに接続できませんでした', 'err');
 });
+audio.addEventListener('ended', () => { if (intent) { markDisconnected(); scheduleRetry(); } });
+// 自分で stop() したときは intent=false なので反応しない。OS 側の都合（着信・省電力など）で止められたときだけ復帰を試みる
+audio.addEventListener('pause', () => {
+  if (intent && !audio.ended && !audio.error) { markDisconnected('一時停止されました。再開します…'); scheduleRetry(); }
+});
+
+// 画面に戻ってきたとき・回線が復活したときは待たずにすぐ繋ぎ直す
+function resumeIfNeeded() {
+  if (intent && (audio.paused || audio.error)) reconnect();
+}
+document.addEventListener('visibilitychange', () => { if (document.visibilityState === 'visible') resumeIfNeeded(); });
+window.addEventListener('online', resumeIfNeeded);
+window.addEventListener('pageshow', resumeIfNeeded);
 
 function setStatus(text, cls) {
   pStatus.textContent = text;
@@ -423,13 +505,21 @@ async function readLive365Title(id, signal) {
   return [t.artist, t.title].filter(Boolean).join(' - ');
 }
 
+// ロック画面・通知領域の表示（曲名が取れない局は局名だけ出す）
+const ARTWORK = /^https?:$/.test(location.protocol)
+  ? [{ src: 'icons/icon-512.png', sizes: '512x512', type: 'image/png' }] : [];
 function updateMediaSession(station, title) {
   if (!('mediaSession' in navigator)) return;
+  if (!title) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: station, artist: 'Smooth Jazz Radio', artwork: ARTWORK });
+    return;
+  }
   const [artist, ...rest] = title.split(' - ');
   navigator.mediaSession.metadata = new MediaMetadata({
     title: rest.length ? rest.join(' - ') : title,
     artist: rest.length ? artist : '',
     album: station,
+    artwork: ARTWORK,
   });
 }
 if ('mediaSession' in navigator) {

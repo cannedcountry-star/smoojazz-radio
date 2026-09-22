@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#14110f">
+<script>
+// PWA 用の manifest / アイコンは http(s) 配信時だけ読み込む（Electron の file:// では同梱していないため）
+if (/^https?:$/.test(location.protocol)) {
+  [['manifest', 'manifest.webmanifest'], ['apple-touch-icon', 'icons/icon-180.png'], ['icon', 'icons/icon-192.png']]
+    .forEach(([rel, href]) => { const l = document.createElement('link'); l.rel = rel; l.href = href; document.head.appendChild(l); });
+}
+</script>
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<meta name="apple-mobile-web-app-title" content="Smooth Jazz">
+<title>Smooth Jazz Radio</title>
+<style>
+  :root {
+    --bg: #14110f;
+    --panel: #1f1a17;
+    --panel-2: #2a2320;
+    --line: #3a322d;
+    --text: #f3ede6;
+    --muted: #a3968b;
+    --accent: #e0a458;
+    --accent-2: #f2c98a;
+    --on: #6fcf97;
+    --err: #e57373;
+  }
+  * { box-sizing: border-box; -webkit-tap-highlight-color: transparent; }
+  html, body {
+    margin: 0; min-height: 100%; background: var(--bg); color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Hiragino Sans", "Noto Sans JP", sans-serif;
+  }
+  body {
+    display: flex; flex-direction: column; align-items: center;
+    padding: env(safe-area-inset-top) 16px env(safe-area-inset-bottom);
+  }
+  header {
+    width: 100%; max-width: 560px; padding: 20px 0 12px;
+    display: flex; align-items: baseline; justify-content: space-between;
+  }
+  header h1 { margin: 0; font-size: 22px; letter-spacing: .04em; }
+  header h1 span { color: var(--accent); }
+  header small { color: var(--muted); font-size: 12px; }
+
+  /* Electron（枠なし窓）のときだけ有効: ヘッダーをドラッグ領域にし、窓操作ボタンを出す */
+  .winbtns { display: none; }
+  body.widget header { -webkit-app-region: drag; padding-top: 12px; }
+  body.widget header small { display: none; }
+  body.widget .winbtns { display: flex; gap: 4px; -webkit-app-region: no-drag; }
+  .winbtns button {
+    width: 28px; height: 28px; border: none; border-radius: 6px; cursor: pointer;
+    background: transparent; color: var(--muted); font-size: 14px;
+  }
+  .winbtns button:hover { background: var(--panel-2); color: var(--text); }
+  .winbtns button.close:hover { background: #7a2e2e; color: #fff; }
+  body.widget .player { padding: 14px; }
+  ::-webkit-scrollbar { width: 8px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 4px; }
+  ::-webkit-scrollbar-thumb:hover { background: var(--muted); }
+
+  /* 再生パネル */
+  .player {
+    width: 100%; max-width: 560px; background: var(--panel);
+    border: 1px solid var(--line); border-radius: 16px; padding: 18px;
+    display: grid; grid-template-columns: 64px 1fr; gap: 16px; align-items: center;
+    position: sticky; top: 0; z-index: 2;
+    box-shadow: 0 10px 30px rgba(0,0,0,.45);
+  }
+  .disc {
+    width: 64px; height: 64px; border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, var(--accent) 0 9px, var(--panel-2) 10px 12px, #111 13px 60%, #222 61% 100%);
+    box-shadow: inset 0 0 0 1px var(--line);
+  }
+  .disc.spinning { animation: spin 3s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  .meta { min-width: 0; }
+  .meta .station { font-weight: 600; font-size: 16px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta .track { color: var(--accent-2); font-size: 14px; margin-top: 4px; min-height: 18px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .meta .status { color: var(--muted); font-size: 12px; margin-top: 4px; }
+  .meta .status.on { color: var(--on); }
+  .meta .status.err { color: var(--err); }
+
+  .controls {
+    grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; margin-top: 4px;
+  }
+  button.play {
+    width: 52px; height: 52px; border-radius: 50%; border: none; cursor: pointer;
+    background: var(--accent); color: #1a1208; font-size: 20px; display: grid; place-items: center;
+    transition: transform .1s, background .15s;
+  }
+  button.play:hover { background: var(--accent-2); }
+  button.play:active { transform: scale(.95); }
+  button.play:disabled { opacity: .4; cursor: default; }
+  .volume { flex: 1; display: flex; align-items: center; gap: 10px; color: var(--muted); font-size: 13px; }
+  .volume input[type=range] { flex: 1; accent-color: var(--accent); }
+  .volume .pct { width: 3.2em; text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* 局リスト */
+  .list { width: 100%; max-width: 560px; margin: 16px 0 32px; display: flex; flex-direction: column; gap: 8px; }
+  .list h2 { font-size: 13px; color: var(--muted); font-weight: 500; margin: 8px 0 2px; letter-spacing: .06em; }
+  .st {
+    width: 100%; text-align: left; background: var(--panel); color: var(--text);
+    border: 1px solid var(--line); border-radius: 12px; padding: 12px 14px; cursor: pointer;
+    display: grid; grid-template-columns: 1fr auto; gap: 4px 12px; align-items: center;
+    transition: background .15s, border-color .15s;
+  }
+  .st:hover { background: var(--panel-2); }
+  .st.active { border-color: var(--accent); background: var(--panel-2); }
+  .st .name { grid-column: 1; grid-row: 1; font-weight: 600; font-size: 15px; }
+  .st .desc { grid-column: 1; grid-row: 2; color: var(--muted); font-size: 12px; }
+  .st .tag  { grid-column: 2; grid-row: 1 / span 2; color: var(--muted); font-size: 11px; text-align: right; line-height: 1.5; white-space: nowrap; }
+  .st.active .tag { color: var(--accent); }
+  /* 行の右端: 非表示 / 戻す ボタン */
+  .st { grid-template-columns: 1fr auto auto; }
+  .st .act {
+    grid-column: 3; grid-row: 1 / span 2; border: 1px solid var(--line); border-radius: 8px;
+    background: transparent; color: var(--muted); font-size: 11px; padding: 6px 8px; cursor: pointer; white-space: nowrap;
+  }
+  .st .act:hover { background: var(--bg); color: var(--text); border-color: var(--muted); }
+  #list { display: flex; flex-direction: column; gap: 8px; }
+  .empty { color: var(--muted); font-size: 12px; padding: 4px 2px; }
+  /* 非表示リスト（折りたたみ） */
+  details.hidden-list { margin-top: 12px; }
+  details.hidden-list summary {
+    cursor: pointer; color: var(--muted); font-size: 13px; letter-spacing: .06em; padding: 8px 0 2px; list-style: none;
+  }
+  details.hidden-list summary::-webkit-details-marker { display: none; }
+  details.hidden-list summary::before { content: '▸ '; }
+  details.hidden-list[open] summary::before { content: '▾ '; }
+  details.hidden-list .inner { display: flex; flex-direction: column; gap: 8px; margin-top: 6px; }
+  details.hidden-list .st { opacity: .7; cursor: default; }
+  details.hidden-list .st:hover { background: var(--panel); }
+  footer { max-width: 560px; color: var(--muted); font-size: 11px; line-height: 1.6; padding-bottom: 24px; }
+</style>
+</head>
+<body>
+<header>
+  <h1><span>♪</span> Smooth Jazz Radio</h1>
+  <small>インターネットラジオ</small>
+  <div class="winbtns">
+    <button id="btnMin" title="最小化" aria-label="最小化">–</button>
+    <button id="btnHide" class="close" title="トレイに格納（終了はトレイアイコンから）" aria-label="閉じる">✕</button>
+  </div>
+</header>
+
+<section class="player">
+  <div class="disc" id="disc"></div>
+  <div class="meta">
+    <div class="station" id="pStation">局を選んでください</div>
+    <div class="track" id="pTrack"></div>
+    <div class="status" id="pStatus">停止中</div>
+  </div>
+  <div class="controls">
+    <button class="play" id="btnPlay" disabled aria-label="再生">▶</button>
+    <label class="volume">
+      🔈
+      <input type="range" id="vol" min="0" max="100" value="80" aria-label="音量">
+      <span class="pct" id="volPct">80%</span>
+    </label>
+  </div>
+</section>
+
+<section class="list">
+  <h2>STATIONS</h2>
+  <div id="list"></div>
+  <details class="hidden-list" id="hiddenDetails">
+    <summary>非表示リスト（<span id="hiddenCount">0</span>）</summary>
+    <div class="inner" id="hiddenList"></div>
+  </details>
+</section>
+
+<footer>
+  曲名は局がメタデータを配信している場合のみ表示されます（局リストの「曲名表示」表記が目安）。<br>
+  ストリームURLは各局が公開しているものを使用しています。配信停止やURL変更で再生できなくなることがあります。
+</footer>
+
+<audio id="audio" preload="none"></audio>
+
+<script>
+// ---- 局データ -------------------------------------------------------
+// np: 曲名の取得方法
+//   { type: 'icy' }              … ストリームの ICY メタデータ（Icy-MetaData ヘッダ）
+//   { type: 'live365', id: '…' } … Live365 の公開API
+//   null                         … 取得手段なし（局名のみ表示）
+const STATIONS = [
+  { name: 'SmoothJazz.com Global Radio', desc: '米国 / 128kbps / 老舗のネット局',
+    url: 'https://smoothjazz.cdnstream1.com/2585_128.mp3', np: null },
+  { name: '101 Smooth Jazz', desc: '米国 / 128kbps',
+    url: 'https://jking.cdnstream1.com/b22139_128mp3', np: null },
+  { name: 'Smooth Jazz 24/7', desc: '米国 / 128kbps',
+    url: 'https://jking.cdnstream1.com/b75154_128mp3', np: null },
+  { name: 'Smooth Jazz Florida', desc: '米国 / 128kbps',
+    url: 'https://streaming.live365.com/a57422', np: { type: 'live365', id: 'a57422' } },
+  { name: '181.FM The Breeze', desc: '米国 / 128kbps',
+    url: 'https://listen.181fm.com/181-breeze_128k.mp3', np: null },
+  { name: '.977 Smooth Jazz', desc: '米国 / 128kbps / 冒頭に広告が入ることあり',
+    url: 'https://playerservices.streamtheworld.com/api/livestream-redirect/977_SMOOJAZZ_SC.mp3', np: null },
+  { name: '1.FM Bay Smooth Jazz', desc: 'スイス / 256kbps',
+    url: 'https://strm112.1.fm/smoothjazz_mobile_mp3', np: null },
+  { name: 'Smooth Jazz Lounge (VIP-Radios)', desc: 'フランス / 128kbps',
+    url: 'https://radio4.vip-radios.fm:18060/stream-128kmp3-SmoothJazzLounge', np: { type: 'icy' } },
+  { name: 'Costa Del Mar – Smooth Jazz', desc: 'スペイン / 96kbps',
+    url: 'https://radio4.cdm-radio.com:18024/stream-mp3-Smooth', np: { type: 'icy' } },
+  { name: 'SmoothJazz.com.pl', desc: 'ポーランド / 320kbps',
+    url: 'https://bcast.vigormultimedia.com:48888/sjcompl320mp3', np: { type: 'icy' } },
+  { name: 'Smooth Jazz Deluxe', desc: 'カナダ / 320kbps',
+    url: 'https://cast1.torontocast.com:4490/;', np: null },
+  { name: 'Tropical Smooth Jazz', desc: 'ブラジル / 128kbps',
+    url: 'https://servidor32-3.brlogic.com:8230/live', np: null },
+];
+
+// ---- 要素 -----------------------------------------------------------
+const audio   = document.getElementById('audio');
+const disc    = document.getElementById('disc');
+const pStation= document.getElementById('pStation');
+const pTrack  = document.getElementById('pTrack');
+const pStatus = document.getElementById('pStatus');
+const btnPlay = document.getElementById('btnPlay');
+const vol     = document.getElementById('vol');
+const volPct  = document.getElementById('volPct');
+const list    = document.getElementById('list');
+
+let current = null;      // 選択中の局
+let playing = false;
+let npTimer = null;      // 曲名ポーリング
+let npAbort = null;      // 曲名取得中の fetch を中断する用
+const NP_INTERVAL = 20000;
+
+// ---- 非表示リスト（局名で管理、localStorage に保存） ------------------
+const HIDDEN_KEY = 'sjr.hidden';
+let hidden = new Set();
+try { hidden = new Set(JSON.parse(localStorage.getItem(HIDDEN_KEY) || '[]')); } catch (e) {}
+function saveHidden() {
+  try { localStorage.setItem(HIDDEN_KEY, JSON.stringify([...hidden])); } catch (e) {}
+}
+function hideStation(i)    { hidden.add(STATIONS[i].name);    saveHidden(); renderList(); }
+function unhideStation(i)  { hidden.delete(STATIONS[i].name); saveHidden(); renderList(); }
+
+// ---- 局リスト描画 ---------------------------------------------------
+const hiddenList  = document.getElementById('hiddenList');
+const hiddenCount = document.getElementById('hiddenCount');
+
+function makeRow(i, isHidden) {
+  const s = STATIONS[i];
+  const row = document.createElement('div');
+  row.className = 'st';
+  row.dataset.i = i;
+  row.setAttribute('role', 'button');
+  row.innerHTML = '<div class="name"></div><div class="desc"></div><div class="tag"></div><button class="act"></button>';
+  row.querySelector('.name').textContent = s.name;
+  row.querySelector('.desc').textContent = s.desc;
+  row.querySelector('.tag').textContent = s.np ? '曲名表示 ○' : '曲名表示 ×';
+  const act = row.querySelector('.act');
+  act.textContent = isHidden ? '戻す' : '非表示';
+  act.title = isHidden ? '局リストに戻す' : '非表示リストへ移動';
+  act.addEventListener('click', (e) => { e.stopPropagation(); isHidden ? unhideStation(i) : hideStation(i); });
+  if (!isHidden) row.addEventListener('click', () => select(i, true));
+  if (current === s) row.classList.add('active');
+  return row;
+}
+
+function renderList() {
+  list.innerHTML = '';
+  hiddenList.innerHTML = '';
+  let shown = 0;
+  STATIONS.forEach((s, i) => {
+    if (hidden.has(s.name)) hiddenList.appendChild(makeRow(i, true));
+    else { list.appendChild(makeRow(i, false)); shown++; }
+  });
+  if (!shown) {
+    const p = document.createElement('div'); p.className = 'empty';
+    p.textContent = 'すべて非表示になっています。非表示リストから「戻す」で復帰できます。';
+    list.appendChild(p);
+  }
+  if (!hidden.size) {
+    const p = document.createElement('div'); p.className = 'empty';
+    p.textContent = '非表示にした局はありません';
+    hiddenList.appendChild(p);
+  }
+  hiddenCount.textContent = hidden.size;
+}
+renderList();
+
+function select(i, autoplay) {
+  current = STATIONS[i];
+  list.querySelectorAll('.st').forEach(el => el.classList.toggle('active', +el.dataset.i === i));
+  pStation.textContent = current.name;
+  pTrack.textContent = '';
+  btnPlay.disabled = false;
+  stop(false);
+  if (autoplay) play();
+}
+
+// ---- 再生・停止 -----------------------------------------------------
+function play() {
+  if (!current) return;
+  setStatus('接続中…', '');
+  audio.src = current.url;
+  audio.volume = vol.value / 100;
+  audio.play().catch(e => setStatus('再生できません: ' + e.message, 'err'));
+}
+
+function stop(updateUi = true) {
+  audio.pause();
+  audio.removeAttribute('src');   // バッファリングも止める
+  audio.load();
+  playing = false;
+  stopNowPlaying();
+  disc.classList.remove('spinning');
+  btnPlay.textContent = '▶';
+  btnPlay.setAttribute('aria-label', '再生');
+  if (updateUi) setStatus('停止中', '');
+}
+
+btnPlay.addEventListener('click', () => playing ? stop() : play());
+
+audio.addEventListener('playing', () => {
+  playing = true;
+  disc.classList.add('spinning');
+  btnPlay.textContent = '■';
+  btnPlay.setAttribute('aria-label', '停止');
+  setStatus('再生中', 'on');
+  startNowPlaying();
+});
+audio.addEventListener('waiting', () => setStatus('バッファリング中…', ''));
+audio.addEventListener('error', () => {
+  stop(false);
+  setStatus('ストリームに接続できませんでした', 'err');
+});
+
+function setStatus(text, cls) {
+  pStatus.textContent = text;
+  pStatus.className = 'status' + (cls ? ' ' + cls : '');
+}
+
+// ---- 音量 -----------------------------------------------------------
+vol.addEventListener('input', () => {
+  audio.volume = vol.value / 100;
+  volPct.textContent = vol.value + '%';
+});
+
+// ---- 曲名表示 -------------------------------------------------------
+function startNowPlaying() {
+  stopNowPlaying();
+  if (!current.np) { pTrack.textContent = '（この局は曲名表示に対応していません）'; return; }
+  pTrack.textContent = '曲名を取得中…';
+  fetchNowPlaying();
+  npTimer = setInterval(fetchNowPlaying, NP_INTERVAL);
+}
+
+function stopNowPlaying() {
+  clearInterval(npTimer); npTimer = null;
+  if (npAbort) { npAbort.abort(); npAbort = null; }
+}
+
+async function fetchNowPlaying() {
+  if (!current || !current.np || !playing) return;
+  const st = current;
+  const ctrl = new AbortController();
+  npAbort = ctrl;
+  try {
+    const title = st.np.type === 'icy'
+      ? await readIcyTitle(st.url, ctrl.signal)
+      : await readLive365Title(st.np.id, ctrl.signal);
+    if (current !== st || !playing) return;   // 取得中に局が変わっていたら捨てる
+    if (title) {
+      pTrack.textContent = title;
+      updateMediaSession(st.name, title);
+    } else {
+      pTrack.textContent = '（曲名情報なし）';
+    }
+  } catch (e) {
+    if (e.name === 'AbortError') return;
+    if (current === st) pTrack.textContent = '（曲名を取得できませんでした）';
+  } finally {
+    if (npAbort === ctrl) npAbort = null;
+  }
+}
+
+// ICY メタデータ: metaint バイトの音声の後に [長さ/16][StreamTitle='…';] が続く。
+// 最初のメタデータブロックだけ読んで切断する（1回あたり約16KB）。
+// icy-metaint ヘッダーは CORS で公開されていない局が多い（Access-Control-Expose-Headers 未設定）ため、
+// 読めない場合は先頭 64KB を読んで StreamTitle を直接探す。
+const ICY_SCAN_LIMIT = 64 * 1024;
+async function readIcyTitle(url, signal) {
+  const res = await fetch(url, { headers: { 'Icy-MetaData': '1' }, signal, cache: 'no-store' });
+  const metaint = parseInt(res.headers.get('icy-metaint'), 10) || 0;
+  const reader = res.body.getReader();
+  let buf = new Uint8Array(0);
+  const append = (chunk) => {
+    const out = new Uint8Array(buf.length + chunk.length);
+    out.set(buf, 0); out.set(chunk, buf.length);
+    buf = out;
+  };
+  const enough = metaint
+    ? () => buf.length > metaint && buf.length >= metaint + 1 + buf[metaint] * 16   // 長さバイト → 本体まで揃うまで
+    : () => buf.length >= ICY_SCAN_LIMIT;
+  while (!enough()) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    append(value);
+  }
+  reader.cancel();
+  const dec = new TextDecoder('utf-8');
+  const text = metaint
+    ? dec.decode(buf.subarray(metaint + 1, metaint + 1 + (buf[metaint] || 0) * 16))
+    : dec.decode(buf);   // 音声部分は化けるが StreamTitle の部分は正しく復元される
+  const m = text.match(/StreamTitle='(.*?)';/);
+  return m ? m[1].trim() : null;
+}
+
+async function readLive365Title(id, signal) {
+  const res = await fetch('https://api.live365.com/station/' + id, { signal, cache: 'no-store' });
+  const j = await res.json();
+  const t = j['current-track'];
+  if (!t) return null;
+  return [t.artist, t.title].filter(Boolean).join(' - ');
+}
+
+function updateMediaSession(station, title) {
+  if (!('mediaSession' in navigator)) return;
+  const [artist, ...rest] = title.split(' - ');
+  navigator.mediaSession.metadata = new MediaMetadata({
+    title: rest.length ? rest.join(' - ') : title,
+    artist: rest.length ? artist : '',
+    album: station,
+  });
+}
+if ('mediaSession' in navigator) {
+  navigator.mediaSession.setActionHandler('play', play);
+  navigator.mediaSession.setActionHandler('pause', () => stop());
+  navigator.mediaSession.setActionHandler('stop', () => stop());
+}
+
+// ---- Electron ウィジェット窓（preload.js が window.widget を提供） ----
+if (window.widget) {
+  document.body.classList.add('widget');
+  document.getElementById('btnMin').addEventListener('click', () => window.widget.minimize());
+  document.getElementById('btnHide').addEventListener('click', () => window.widget.hide());
+}
+
+// ---- PWA（スマホなどのブラウザで開いたとき） -----------------------------
+// http(s) で配信されているときだけ Service Worker を登録する（Electron の file:// では何もしない）
+if (!window.widget && 'serviceWorker' in navigator && /^https?:$/.test(location.protocol)) {
+  window.addEventListener('load', () => navigator.serviceWorker.register('sw.js').catch(() => {}));
+}
+</script>
+</body>
+</html>

@@ -1,0 +1,38 @@
+{
+  "name": "smooth-jazz-radio",
+  "productName": "Smooth Jazz Radio",
+  "version": "1.0.0",
+  "description": "Smooth Jazz インターネットラジオ ウィジェット",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win portable"
+  },
+  "build": {
+    "appId": "local.smoothjazzradio",
+    "productName": "Smooth Jazz Radio",
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "main.js",
+      "preload.js",
+      "index.html",
+      "build/icon.png",
+      "build/tray.png"
+    ],
+    "win": {
+      "target": "portable",
+      "icon": "build/icon.png"
+    },
+    "portable": {
+      "artifactName": "SmoothJazzRadio.exe"
+    }
+  },
+  "devDependencies": {
+    "electron": "^44.4.3",
+    "electron-builder": "^26.15.3"
+  }
+}
